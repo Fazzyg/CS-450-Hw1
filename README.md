@@ -20,7 +20,7 @@ PIPE: Piping command output between commands.
 #Parsing and Execution
 The shell's parsing mechanism now includes advanced error checking to ensure that the syntax of the command line meets the specified requirements, rejecting commands that do not conform.
 
-Compilation
+# Compilation
 To compile the shell use the following command in the terminal:
 Make Clean
  -Make
