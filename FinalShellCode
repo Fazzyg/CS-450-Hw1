@@ -1,0 +1,714 @@
+// Shell.
+
+#include "kernel/types.h"
+#include "user/user.h"
+#include "kernel/fcntl.h"
+
+// Parsed command representation
+#define EXEC 1
+#define REDIR 2
+#define PIPE 3
+#define LIST 4
+#define BACK 5
+
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
+
+#define MAXARGS 10
+
+int debug = 0; 
+struct cmd
+{
+  int type;
+};
+
+struct execcmd
+{
+  int type;
+  char *argv[MAXARGS];
+  char *eargv[MAXARGS];
+};
+
+struct redircmd
+{
+  int type;
+  struct cmd *cmd;
+  char *file;
+  char *efile;
+  int fileD;
+  int mode;
+};
+
+struct pipecmd
+{
+  int type;
+  struct cmd *left;
+  struct cmd *right;
+};
+
+struct listcmd
+{
+  int type;
+  struct cmd *left;
+  struct cmd *right;
+};
+
+struct backcmd
+{
+  int type;
+  struct cmd *cmd;
+};
+
+int fork1(void); // Fork but panics on failure.
+void perror(char *);
+struct cmd *parsecmd(char *);
+void runcmd(struct cmd *) __attribute__((noreturn));
+int peek(char **ps, char *es, char *toks);
+
+// Execute cmd.  Never returns.
+void runcmd(struct cmd *cmd)
+{
+  int p[2];
+  struct backcmd *bcmd;
+  struct execcmd *ecmd;
+  struct listcmd *lcmd;
+  struct pipecmd *pcmd;
+  struct redircmd *rcmd;
+
+  if (cmd == 0)
+    exit(1);
+
+  switch (cmd->type)
+  {
+  default:
+    perror("runcmd");
+
+  case EXEC:
+    ecmd = (struct execcmd *)cmd;
+    if (ecmd->argv[0] == 0)
+      exit(1);
+    exec(ecmd->argv[0], ecmd->argv);
+    fprintf(2, "exec %s failed\n", ecmd->argv[0]);
+    break;
+
+  case REDIR:
+    rcmd = (struct redircmd *)cmd;
+    close(rcmd->fileD);
+    if (open(rcmd->file, rcmd->mode) < 0)
+    {
+      fprintf(2, "open %s failed\n", rcmd->file);
+      exit(1);
+    }
+    runcmd(rcmd->cmd);
+    break;
+
+  case LIST:
+    lcmd = (struct listcmd *)cmd;
+    if (fork1() == 0)
+      runcmd(lcmd->left);
+    wait(0);
+    runcmd(lcmd->right);
+    break;
+
+  case PIPE:
+    pcmd = (struct pipecmd *)cmd;
+    if (pipe(p) < 0)
+      perror("pipe");
+    if (fork1() == 0)
+    {
+      close(1);
+      dup(p[1]);
+      close(p[0]);
+      close(p[1]);
+      runcmd(pcmd->left);
+    }
+    if (fork1() == 0)
+    {
+      close(0);
+      dup(p[0]);
+      close(p[0]);
+      close(p[1]);
+      runcmd(pcmd->right);
+    }
+    close(p[0]);
+    close(p[1]);
+    wait(0);
+    wait(0);
+    break;
+
+  case BACK:
+    bcmd = (struct backcmd *)cmd;
+    if (fork1() == 0)
+      runcmd(bcmd->cmd);
+    break;
+  }
+  exit(0);
+}
+
+int getcmd(char *buf, int nbuf)
+{
+  write(2, "S2024$ ", 7);
+  memset(buf, 0, nbuf);
+  gets(buf, nbuf);
+  if (buf[0] == 0) // EOF
+    return -1;
+  return 0;
+}
+char* moveComm(const char *);
+char* delString(const char *);
+int verify(const char*);
+
+int main(void)
+{
+  // creates buffer & file decriptors
+  static char buf[100];
+  int fileD;
+
+  // COonfirms three file descriptors are open
+  while ((fileD = open("console", O_RDWR)) >= 0)
+  {
+    if (fileD >= 3)
+    {
+      close(fileD);
+      break;
+    }
+  }
+
+  // Read and run input commands
+  while (getcmd(buf, sizeof(buf)) >= 0)
+  {
+
+    // Checks if command is cd
+    if (buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' ')
+    {
+      // Chdir is called by parent, not the child.
+      buf[strlen(buf) - 1] = 0; // chop \n
+      if (chdir(buf + 3) < 0)
+        fprintf(2, "cannot cd %s\n", buf + 3);
+      continue;
+    }
+
+    if(verify(buf)!=0){
+      fprintf(2, "invalid command");
+      perror("Syntax");
+    }
+    char *fbuf;
+    
+    fbuf = delString(moveComm(moveComm(buf)));
+    // fbuf points to the final command string to be executed
+    if (debug == 1){
+      printf("2024$ Command to execute : %s", fbuf); // Print command to be executed
+    }
+  
+    if (fork1() == 0)
+      runcmd(parsecmd(fbuf));
+    wait(0);
+    free (fbuf);
+  }
+  exit(0);
+}
+
+void perror(char *s)
+{
+  fprintf(2, "%s\n", s);
+  exit(1);
+}
+
+int fork1(void)
+{
+  int pid;
+
+  pid = fork();
+  if (pid == -1)
+    perror("fork");
+  return pid;
+}
+
+//  Constructors
+
+struct cmd *
+execcmd(void)
+{
+  struct execcmd *cmd;
+
+  cmd = malloc(sizeof(*cmd));
+  memset(cmd, 0, sizeof(*cmd));
+  cmd->type = EXEC;
+  return (struct cmd *)cmd;
+}
+
+struct cmd *
+redircmd(struct cmd *subcmd, char *file, char *efile, int mode, int fileD)
+{
+  struct redircmd *cmd;
+
+  cmd = malloc(sizeof(*cmd));
+  memset(cmd, 0, sizeof(*cmd));
+  cmd->type = REDIR;
+  cmd->cmd = subcmd;
+  cmd->file = file;
+   cmd->mode = mode;
+  cmd->fileD = fileD;
+  cmd->efile = efile;
+  return (struct cmd *)cmd;
+}
+
+struct cmd *
+pipecmd(struct cmd *left, struct cmd *right)
+{
+  struct pipecmd *cmd;
+
+  cmd = malloc(sizeof(*cmd));
+  memset(cmd, 0, sizeof(*cmd));
+  cmd->type = PIPE;
+  cmd->left = left;
+  cmd->right = right;
+  return (struct cmd *)cmd;
+}
+
+struct cmd *
+listcmd(struct cmd *left, struct cmd *right)
+{
+  struct listcmd *cmd;
+
+  cmd = malloc(sizeof(*cmd));
+  memset(cmd, 0, sizeof(*cmd));
+  cmd->type = LIST;
+  cmd->left = left;
+  cmd->right = right;
+  return (struct cmd *)cmd;
+}
+
+struct cmd *
+backcmd(struct cmd *subcmd)
+{
+  struct backcmd *cmd;
+
+  cmd = malloc(sizeof(*cmd));
+  memset(cmd, 0, sizeof(*cmd));
+  cmd->type = BACK;
+  cmd->cmd = subcmd;
+  return (struct cmd *)cmd;
+}
+
+//  Parsing
+
+char blankspce[] = " \t\r\n\v";
+char symbols[] = "<|>&;()";
+
+int gettoken(char **ps, char *es, char **q, char **eq)
+{
+  char *s;
+  int ret;
+
+  s = *ps;
+  while (s < es && strchr(blankspce, *s))
+    s++;
+  if (q)
+    *q = s;
+  ret = *s;
+  switch (*s)
+  {
+  case 0:
+    break;
+  case '|':
+  case '(':
+  case ')':
+  case ';':
+  case '&':
+  case '<':
+    s++;
+    break;
+  case '>':
+    s++;
+    if (*s == '>')
+    {
+      ret = '+';
+      s++;
+    }
+    break;
+  default:
+    ret = 'a';
+    while (s < es && !strchr(blankspce, *s) && !strchr(symbols, *s))
+      s++;
+    break;
+  }
+  if (eq)
+    *eq = s;
+
+  while (s < es && strchr(blankspce, *s))
+    s++;
+  *ps = s;
+  return ret;
+}
+// looks for token or symbol, the q and eq looks at the begining and the ending of token
+int peek(char **ps, char *es, char *toks)
+{
+  char *s;
+
+  s = *ps;
+  while (s < es && strchr(blankspce, *s))
+    s++;
+  *ps = s;
+  return *s && strchr(toks, *s);
+}
+// checks to see if the string is in toks 
+
+struct cmd *parseline(char **, char *);
+struct cmd *parsepipe(char **, char *);
+struct cmd *parseexec(char **, char *);
+struct cmd *nullKill(struct cmd *);
+
+struct cmd *
+parsecmd(char *s)
+{
+  char *es;
+  struct cmd *cmd;
+
+  es = s + strlen(s);
+  cmd = parseline(&s, es);
+  peek(&s, es, "");
+  if (s != es)
+  {
+    fprintf(2, "leftovers: %s\n", s);
+    perror("syntax");
+  }
+  nullKill(cmd);
+  return cmd;
+}
+
+struct cmd *
+parseline(char **ps, char *es)
+{
+  struct cmd *cmd;
+
+  cmd = parsepipe(ps, es);
+  while (peek(ps, es, "&"))
+  {
+    gettoken(ps, es, 0, 0);
+    cmd = backcmd(cmd);
+  }
+  if (peek(ps, es, ";"))
+  {
+    gettoken(ps, es, 0, 0);
+    cmd = listcmd(cmd, parseline(ps, es));
+  }
+  return cmd;
+}
+
+struct cmd *
+parsepipe(char **ps, char *es)
+{
+  struct cmd *cmd;
+
+  cmd = parseexec(ps, es);
+  if (peek(ps, es, "|"))
+  {
+    gettoken(ps, es, 0, 0);
+    cmd = pipecmd(cmd, parsepipe(ps, es));
+  }
+  return cmd;
+}
+
+struct cmd *
+parseredirs(struct cmd *cmd, char **ps, char *es)
+{
+  int tok;
+  char *q, *eq;
+
+  while (peek(ps, es, "<>"))
+  {
+    tok = gettoken(ps, es, 0, 0);
+    if (gettoken(ps, es, &q, &eq) != 'a')
+      perror("missing file for redirection");
+    switch (tok)
+    {
+    case '<':
+      cmd = redircmd(cmd, q, eq, O_RDONLY, 0);
+      break;
+    case '>':
+      cmd = redircmd(cmd, q, eq, O_WRONLY | O_CREATE | O_TRUNC, 1);
+      break;
+      // >>
+    case '+': 
+      cmd = redircmd(cmd, q, eq, O_WRONLY | O_CREATE, 1);
+      break;
+    }
+  }
+  return cmd;
+}
+
+struct cmd *
+parseblock(char **ps, char *es)
+{
+  struct cmd *cmd;
+
+  if (!peek(ps, es, "("))
+    perror("parseblock");
+  gettoken(ps, es, 0, 0);
+  cmd = parseline(ps, es);
+  if (!peek(ps, es, ")"))
+    perror("syntax - missing )");
+  gettoken(ps, es, 0, 0);
+  cmd = parseredirs(cmd, ps, es);
+  return cmd;
+}
+
+struct cmd *
+parseexec(char **ps, char *es)
+{
+  char *q, *eq;
+  int tok, argc;
+  struct execcmd *cmd;
+  struct cmd *ret;
+
+  if (peek(ps, es, "("))
+    return parseblock(ps, es);
+
+  ret = execcmd();
+  cmd = (struct execcmd *)ret;
+
+  argc = 0;
+  ret = parseredirs(ret, ps, es);
+  while (!peek(ps, es, "|)&;"))
+  {
+    if ((tok = gettoken(ps, es, &q, &eq)) == 0)
+      break;
+    if (tok != 'a')
+      perror("syntax\n");
+    cmd->argv[argc] = q;
+    cmd->eargv[argc] = eq;
+    argc++;
+    if (argc >= MAXARGS)
+      perror("too many args");
+    ret = parseredirs(ret, ps, es);
+  }
+  cmd->argv[argc] = 0;
+  cmd->eargv[argc] = 0;
+  return ret;
+}
+
+// null-kill all the counted strings
+struct cmd *
+nullKill(struct cmd *cmd)
+{
+  int i;
+  struct backcmd *bcmd;
+  struct execcmd *ecmd;
+  struct listcmd *lcmd;
+  struct pipecmd *pcmd;
+  struct redircmd *rcmd;
+
+  if (cmd == 0)
+    return 0;
+
+  switch (cmd->type)
+  {
+  case EXEC:
+    ecmd = (struct execcmd *)cmd;
+    for (i = 0; ecmd->argv[i]; i++)
+      *ecmd->eargv[i] = 0;
+    break;
+
+  case REDIR:
+    rcmd = (struct redircmd *)cmd;
+    nullKill(rcmd->cmd);
+    *rcmd->efile = 0;
+    break;
+
+  case PIPE:
+    pcmd = (struct pipecmd *)cmd;
+    nullKill(pcmd->left);
+    nullKill(pcmd->right);
+    break;
+
+  case LIST:
+    lcmd = (struct listcmd *)cmd;
+    nullKill(lcmd->left);
+    nullKill(lcmd->right);
+    break;
+
+  case BACK:
+    bcmd = (struct backcmd *)cmd;
+    nullKill(bcmd->cmd);
+    break;
+  }
+  return cmd;
+}
+
+// for the parenthesis my goal is to try and manually reorginize so I can get the desired output
+// visual sample below of how I want to reorganize the input so that my ouptut could then be correct in terms of the assingment
+// cmd1 ; (cmd2 ; cmd3) => (cmd2 ; cmd3) ; cmd1
+
+
+// implementation of strncat
+void strnCat(char *dest, const char *src, unsigned int n) {
+    unsigned int dest_len = strlen(dest);
+    unsigned int i;
+    for (i = 0; i < n && src[i] != '\0'; i++)
+        dest[dest_len + i] = src[i];
+    dest[dest_len + i] = '\0';
+}
+
+//implementation of strncpy
+void strnCpy(char *dest, const char *src, unsigned int n) {
+    unsigned int i;
+    for (i = 0; i < n && src[i] != '\0'; i++)
+        dest[i] = src[i];
+    for ( ; i < n; i++)
+        dest[i] = '\0';
+}
+
+unsigned int strSpn(const char *s1, const char *s2) {
+    const char *p1 = s1, *p2;
+    // Iterate over characters in s1
+    while (*p1) {
+        for (p2 = s2; *p2; p2++) {
+            if (*p1 == *p2) break; //breaks if theres a match
+        }
+        if (!*p2) break; // Breaks out of loop and ends s2 without a match
+        p1++; // Next char at s1
+    }
+    return p1 - s1; // Return length of the segment
+}
+
+// implementation of strcat
+void strCat(char *dest, const char *src) {
+    strnCat(dest, src, strlen(src));
+}
+
+#define MAX_CMD_LEN 512
+#define MAX_CMDS 20 
+
+// moveComm is the function that is going to rearrange the commands based on their "priority"
+char * moveComm(const char *input) {
+    static char cmds[MAX_CMDS][MAX_CMD_LEN]; // storing commands
+    int prior[MAX_CMDS]; // stores priority of each command
+    char *outp = malloc(MAX_CMD_LEN * MAX_CMDS);
+    int startCom = 0, end = 0; // tracks when the command begins and ends
+    int cmdIdx = 0, lvl = 0;
+
+	if (!outp) return NULL;
+    // Initialize output and priority tracking
+    memset(outp, 0, MAX_CMD_LEN * MAX_CMDS);
+    memset(prior, 0, sizeof(prior));
+
+    // Parse input to extract commands and their priority
+    for (int i = 0; input[i] != '\0' && cmdIdx < MAX_CMDS; i++) {
+        if (input[i] == '(') {
+            lvl++;
+            if (lvl == 1) startCom = i + 1; 
+        } else if (input[i] == ')') {
+            if (lvl == 1) {
+                end = i;
+                if (end > startCom) {
+                    // Extract command
+                    memcpy(cmds[cmdIdx], &input[startCom], end - startCom);
+                    cmds[cmdIdx][end - startCom] = '\0';
+                    prior[cmdIdx] = lvl;
+                    cmdIdx++;
+                }
+                startCom = i + 1; // Reset start for next command
+            }
+            lvl--;
+        } else if (input[i] == ';' && lvl == 0) {
+            if (i > startCom) {
+                // Extract command with highest priority
+                memcpy(cmds[cmdIdx], &input[startCom], i - startCom);
+                cmds[cmdIdx][i - startCom] = '\0';
+                prior[cmdIdx] = lvl;
+                cmdIdx++;
+            }
+            startCom = i + 1; // Moving starting point after the semicolon
+        }
+    }
+
+    // Handle last command if we dont have a trailing semicolon
+    if (lvl == 0 && startCom < strlen(input)) {
+        strcpy(cmds[cmdIdx], &input[startCom]);
+        prior[cmdIdx] = lvl;
+        cmdIdx++;
+    }
+
+    // Rearrange commands, innermost commands first (highest priority)
+    for (int i = 0; i < cmdIdx; i++) {
+        if (prior[i] == 1) { // high priority commands
+            if (outp[0] != '\0') strCat(outp, " ; ");
+            strCat(outp, cmds[i]);
+        }
+    }
+    for (int i = 0; i < cmdIdx; i++) {
+        if (prior[i] == 0) { // less prior commands
+            if (outp[0] != '\0') strCat(outp, " ; ");
+            strCat(outp, cmds[i]);
+        }
+    }
+    return outp;
+}
+
+char * delString(const char *input) {
+	char *outp = malloc(strlen(input) + 1);
+    int x = 0, y = 0;
+    int spce = 0; // Tracks for sequences of spaces
+    int semiC = 0; // tracks for sequences of semicol.
+    
+    if (!outp) return NULL;
+
+    while (input[x] != '\0') {
+        if (input[x] == ' ') {
+            if (!spce && !semiC && y > 0) { // Add only one space if not after a semicolon
+                outp[y++] = ' ';
+            }
+            spce = 1; // current char is space
+        } else if (input[x] == ';') {
+            if (!semiC) { // Add semicolon if not in a sequence already
+                outp[y++] = ';';
+            }
+            semiC = 1; // in a semicolon sequence
+            spce = 0; // Reset space flag, there is a semicol
+        } else {
+            outp[y++] = input[x];
+            spce = 0; // Reset space flag, there is a non-space char
+            semiC = 0; // Reset semicol flag, there is non semicol char
+        }
+        x++;
+    }
+
+    outp[y] = '\0'; // Null-kill the output string
+    return outp;
+}
+
+int verify(const char *input) {
+    int balance = 0; // Track balance of parentheses
+    int lastChr = ' '; // Initialize to space to handle start-of-string logic
+    const char *blankspce = " \t\n\r\f\v"; // List of blankspace characters
+
+    for (int i = 0; input[i] != '\0'; i++) {
+        if (input[i] == '(') {
+            balance++;
+            // Check if previous character is not a semicolon, blankspace, or another opening parenthesis
+            if (lastChr != ';' && !strchr(blankspce, lastChr) && lastChr != '(') {
+                return -1;
+            }
+        } else if (input[i] == ')') {
+            balance--;
+            if (balance < 0) { 
+                return -1;
+            }
+        } else if (input[i] == ';') {
+            if (lastChr == ';') { // Consecutive semicolons
+                return -1;
+            }
+        } // No need for default case; we handle all relevant cases above
+        // Update lastChr if it's not blankspace, or if at the start
+        if (!strchr(blankspce, input[i]) || i == 0) {
+            lastChr = input[i];
+        }
+    }
+
+    if (balance != 0) { // Check for unbalanced parentheses at  end
+        return -1;
+    }
+
+    return 0; // Syntax is correct
