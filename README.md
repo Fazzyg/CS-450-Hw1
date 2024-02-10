@@ -23,6 +23,6 @@ The shell's parsing mechanism now includes advanced error checking to ensure tha
 Compilation
 To compile the shell use the following command in the terminal:
 Make Clean
-Make
-Make Qemu
-Then the specified prompt "S2024$" will appear in the terminal
+-Make
+-Make Qemu
+.Then the specified prompt "S2024$" will appear in the terminal
